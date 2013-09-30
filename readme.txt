@@ -158,3 +158,4 @@ Thanks to following people for providing translation files for WP-DB-Backup:
 
 == Past Contributors ==
 skippy, Firas, LaughingLizard, MtDewVirus, Podz, Ringmaster
+

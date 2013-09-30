@@ -1,21 +1,13 @@
 <?php
 /*
 Plugin Name: WordPress Database Backup
-Plugin URI: http://ilfilosofo.com/blog/wp-db-backup
+Plugin URI: http://austinmatzko.com/wordpress-plugins/wp-db-backup/
 Description: On-demand backup of your WordPress database. Navigate to <a href="edit.php?page=wp-db-backup">Tools &rarr; Backup</a> to get started.
 Author: Austin Matzko 
-Author URI: http://ilfilosofo.com/
-Version: 2.3-alpha
+Author URI: http://austinmatzko.com/
+Version: 2.2.4
 
-Development continued from that done by Skippy (http://www.skippy.net/)
-
-Originally modified from Mark Ghosh's One Click Backup, which 
-in turn was derived from phpMyAdmin.
-
-Many thanks to Owen (http://asymptomatic.net/wp/) for his patch
-   http://dev.wp-plugins.org/ticket/219
-
-Copyright 2010  Austin Matzko  ( email : austin@pressedcode.com )
+Copyright 2013  Austin Matzko  (email : austin at pressedcode.com)
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -32,144 +24,80 @@ Copyright 2010  Austin Matzko  ( email : austin@pressedcode.com )
     Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110, USA
 */
 
-class WP_DB_Backup {
+/**
+ * Change WP_BACKUP_DIR if you want to
+ * use a different backup location
+ */
+
+if ( ! defined('ABSPATH') ) {
+	die('Please do not load this file directly.');
+}
+
+$rand = substr( md5( md5( DB_PASSWORD ) ), -5 );
+global $wpdbb_content_dir, $wpdbb_content_url, $wpdbb_plugin_dir;
+$wpdbb_content_dir = ( defined('WP_CONTENT_DIR') ) ? WP_CONTENT_DIR : ABSPATH . 'wp-content';
+$wpdbb_content_url = ( defined('WP_CONTENT_URL') ) ? WP_CONTENT_URL : get_option('siteurl') . '/wp-content';
+$wpdbb_plugin_dir = ( defined('WP_PLUGIN_DIR') ) ? WP_PLUGIN_DIR : $wpdbb_content_dir . '/plugins';
+
+if ( ! defined('WP_BACKUP_DIR') ) {
+	define('WP_BACKUP_DIR', $wpdbb_content_dir . '/backup-' . $rand . '/');
+}
+
+if ( ! defined('WP_BACKUP_URL') ) {
+	define('WP_BACKUP_URL', $wpdbb_content_url . '/backup-' . $rand . '/');
+}
+
+if ( ! defined('ROWS_PER_SEGMENT') ) {
+	define('ROWS_PER_SEGMENT', 100);
+}
+
+/** 
+ * Set MOD_EVASIVE_OVERRIDE to true 
+ * and increase MOD_EVASIVE_DELAY 
+ * if the backup stops prematurely.
+ */
+// define('MOD_EVASIVE_OVERRIDE', false);
+if ( ! defined('MOD_EVASIVE_DELAY') ) {
+	define('MOD_EVASIVE_DELAY', '500');
+}
+
+class wpdbBackup {
 
 	var $backup_complete = false;
 	var $backup_file = '';
 	var $backup_filename;
-	var $basename;
+	var $core_table_names = array();
 	var $errors = array();
-	var $mod_evasive_override = false;
+	var $basename;
 	var $page_url;
 	var $referer_check_key;
-	var $_rows_per_segment = 100;
 	var $version = '2.1.5-alpha';
 
-	function WP_DB_Backup() 
-	{
-		return $this->__construct();
+	function module_check() {
+		$mod_evasive = false;
+		if ( defined( 'MOD_EVASIVE_OVERRIDE' ) && true === MOD_EVASIVE_OVERRIDE ) return true;
+		if ( ! defined( 'MOD_EVASIVE_OVERRIDE' ) || false === MOD_EVASIVE_OVERRIDE ) return false;
+		if ( function_exists('apache_get_modules') ) 
+			foreach( (array) apache_get_modules() as $mod ) 
+				if ( false !== strpos($mod,'mod_evasive') || false !== strpos($mod,'mod_dosevasive') )
+					return true;
+		return false;
 	}
 
-	function __construct()
-	{
+	function wpdbBackup() {
 		global $table_prefix, $wpdb;
-		
-		/**
-		 * Change WP_BACKUP_DIR if you want to
-		 * use a different backup location
-		 */
-
-		$rand = substr( md5( md5( DB_PASSWORD ) ), -5 );
-		$wpdbb_content_dir = ( defined('WP_CONTENT_DIR') ) ? WP_CONTENT_DIR : ABSPATH . 'wp-content';
-		$wpdbb_content_url = ( defined('WP_CONTENT_URL') ) ? WP_CONTENT_URL : get_option('siteurl') . '/wp-content';
-		$wpdbb_plugin_dir = ( defined('WP_PLUGIN_DIR') ) ? WP_PLUGIN_DIR : $wpdbb_content_dir . '/plugins';
-
-		if ( ! defined('WP_BACKUP_DIR') ) {
-			define('WP_BACKUP_DIR', $wpdbb_content_dir . '/backup-' . $rand . '/');
-		}
-
-		if ( ! defined('WP_BACKUP_URL') ) {
-			define('WP_BACKUP_URL', $wpdbb_content_url . '/backup-' . $rand . '/');
-		}
-
-		if ( defined('ROWS_PER_SEGMENT') ) {
-			$this->_rows_per_segment = (int) ROWS_PER_SEGMENT;	
-		}
-
-		/** 
-		 * Someone can set MOD_EVASIVE_OVERRIDE to true 
-		 * and increase MOD_EVASIVE_DELAY 
-		 * if the backup stops prematurely.
-		 */
-		if ( defined('MOD_EVASIVE_OVERRIDE') ) {
-			$this->mod_evasive_override = (bool) MOD_EVASIVE_OVERRIDE;
-		}
-
-		if ( ! defined('MOD_EVASIVE_DELAY') ) {
-			define('MOD_EVASIVE_DELAY', '500');
-		}
-
-		$table_prefix = ( isset( $table_prefix ) ) ? $table_prefix : $wpdb->prefix;
-		$datum = gmdate("Ymd_B");
-		$this->backup_filename = DB_NAME . "_$table_prefix$datum.sql";
-
-		$this->backup_dir = trailingslashit(apply_filters('wp_db_b_backup_dir', WP_BACKUP_DIR));
-		$this->basename = 'wp-db-backup';
-	
-		$this->referer_check_key = $this->basename . '-download_' . DB_NAME;
-		$query_args = array( 'page' => $this->basename );
-		if ( function_exists('wp_create_nonce') )
-			$query_args = array_merge( $query_args, array('_wpnonce' => wp_create_nonce($this->referer_check_key)) );
-		$this->page_url = add_query_arg( $query_args );
-
-		$this->attach_event_listeners();
-	}
-
-	function attach_event_listeners()
-	{
-		add_action('init', array(&$this, 'init_textdomain'));
-		add_action('load-update-core.php', array(&$this, 'update_notice_action'));
 		add_action('wp_ajax_save_backup_time', array(&$this, 'save_backup_time'));
+		add_action('init', array(&$this, 'init_textdomain'));
+		add_action('init', array(&$this, 'set_page_url'));
+		add_action('load-update-core.php', array(&$this, 'update_notice_action'));
+		add_action('wp_db_backup_cron', array(&$this, 'cron_backup'));
 		add_action('wp_cron_daily', array(&$this, 'wp_cron_daily'));
-		add_action('wp_db_backup_cron', array(&$this, 'do_cron_backup'));
-
-		add_filter('plugin_action_links', array(&$this, 'filter_plugin_action_links'), 10, 2 );
-		add_filter('cron_schedules', array(&$this, 'add_cron_sched_options'));
+		add_filter('cron_schedules', array(&$this, 'add_sched_options'));
 		add_filter('wp_db_b_schedule_choices', array(&$this, 'schedule_choices'));
 		
-		if (isset($_POST['do_backup'])) {
-			if ( ! $this->is_wp_secure_enough() )
-				return false;
-			check_admin_referer($this->referer_check_key);
-			if ( ! $this->current_user_can_backup() ) {
-				$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => __('You are not allowed to perform backups.','wp-db-backup')));
-				return false;
-			}
-
-			// save exclude prefs
-
-			$exc_revisions = ( isset( $_POST['exclude-revisions'] ) ) ? (array) $_POST['exclude-revisions'] : array();
-			$exc_spam = ( isset( $_POST['exclude-spam'] ) ) ? (array) $_POST['exclude-spam'] : array();
-			update_option('wp_db_backup_excs', array('revisions' => $exc_revisions, 'spam' => $exc_spam));
-			switch($_POST['do_backup']) {
-			case 'backup':
-				add_action('init', array(&$this, 'perform_backup'));
-				break;
-			case 'fragments':
-				add_action('admin_menu', array(&$this, 'fragment_menu'));
-				break;				
-			}
-		} elseif (isset($_GET['fragment'] )) {
-			check_admin_referer($this->referer_check_key);
-			if ( ! $this->current_user_can_backup() ) {
-				$this->log_error(array('loc' => 'frame', 'kind' => 'fatal', 'msg' => __('You are not allowed to perform backups.','wp-db-backup')));
-				return false;
-			}
-			add_action('init', array(&$this, 'init'));
-		} elseif (isset($_GET['backup'] )) {
-			check_admin_referer($this->referer_check_key);
-			if ( ! $this->current_user_can_backup() ) {
-				$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => __('You are not allowed to perform backups.','wp-db-backup')));
-				return false;
-			}
-			add_action('init', array(&$this, 'init'));
-		} else {
-			add_action('admin_menu', array(&$this, 'admin_menu'));
-		}
-	}
-
-	/**
-	 * Get the core WordPress table names.
-	 *
-	 * @access private
-	 *
-	 * @return array The array of core tables names.
-	 */
-	function _get_core_table_names()
-	{
-		global $wpdb;
-
-		$core_table_names = array();
+		$table_prefix = ( isset( $table_prefix ) ) ? $table_prefix : $wpdb->prefix;
+		$datum = date("Ymd_B");
+		$this->backup_filename = DB_NAME . "_$table_prefix$datum.sql";
 
 		$possible_names = array(
 			'categories',
@@ -188,38 +116,58 @@ class WP_DB_Backup {
 			'users',
 			'usermeta',
 		);
-		
+
 		foreach( $possible_names as $name ) {
 			if ( isset( $wpdb->{$name} ) ) {
-				$core_table_names[] = $wpdb->{$name};
+				$this->core_table_names[] = $wpdb->{$name};
 			}
 		}
+	
+		$this->backup_dir = trailingslashit(apply_filters('wp_db_b_backup_dir', WP_BACKUP_DIR));
+		$this->basename = 'wp-db-backup';
+	
+		$this->referer_check_key = $this->basename . '-download_' . DB_NAME;
+		if (isset($_POST['do_backup'])) {
+			$this->wp_secure('fatal');
+			check_admin_referer($this->referer_check_key);
+			$this->can_user_backup('main');
+			// save exclude prefs
 
-		return $core_table_names;
+			$exc_revisions = isset( $_POST['exclude-revisions'] ) ? (array) $_POST['exclude-revisions'] : array();
+			$exc_spam = isset( $_POST['exclude-spam'] ) ? (array) $_POST['exclude-spam'] : array();
+			update_option('wp_db_backup_excs', array('revisions' => $exc_revisions, 'spam' => $exc_spam));
+			switch($_POST['do_backup']) {
+			case 'backup':
+				add_action('init', array(&$this, 'perform_backup'));
+				break;
+			case 'fragments':
+				add_action('admin_menu', array(&$this, 'fragment_menu'));
+				break;				
+			}
+		} elseif (isset($_GET['fragment'] )) {
+			$this->can_user_backup('frame');
+			add_action('init', array(&$this, 'init'));
+		} elseif (isset($_GET['backup'] )) {
+			$this->can_user_backup();
+			add_action('init', array(&$this, 'init'));
+		} else {
+			add_action('admin_menu', array(&$this, 'admin_menu'));
+		}
 	}
 	
 	function init() {
-		if ( ! $this->current_user_can_backup() ) {
-			$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => __('You are not allowed to perform backups.','wp-db-backup')));
-			return false;
-		}
-		if ( isset($_GET['backup']) ) {
-			if ( ! wp_verify_nonce($_GET['_wpnonce'], $this->referer_check_key) ) {
-				$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => sprintf(__('There appears to be an unauthorized attempt from this site to access your database located at %1s.  The attempt has been halted.','wp-db-backup'),get_option('home'))));
-			}
+		$this->can_user_backup();
+		if (isset($_GET['backup'])) {
 			$via = isset($_GET['via']) ? $_GET['via'] : 'http';
 			
 			$this->backup_file = $_GET['backup'];
-			if ( 0 < validate_file($this->backup_file) ) {
-				$this->log_error(array('kind' => 'fatal', 'loc' => 'frame', 'msg' => __('Invalid file request.','wp-db-backup')));
-				return false;
-			}
+			$this->validate_file($this->backup_file);
 
 			switch($via) {
 			case 'smtp':
 			case 'email':
 				$success = $this->deliver_backup($this->backup_file, 'smtp', $_GET['recipient'], 'frame');
-				$this->print_error_messages( 'frame' );
+				$this->error_display( 'frame' );
 				if ( $success ) {
 					echo '
 						<!-- ' . $via . ' -->
@@ -233,20 +181,22 @@ class WP_DB_Backup {
 				}
 				break;
 			default:
-				$this->deliver_backup($this->backup_file, $via);
-				$this->print_error_messages( 'frame' );
+				$success = $this->deliver_backup($this->backup_file, $via);
+				echo $this->error_display( 'frame', false );
+				
+				if ( $success ) {
+					echo '
+					<script type="text/javascript">
+						window.parent.setProgress("' . __('Backup Complete!','wp-db-backup') . '");
+					</script>
+					';
+				}
 			}
-			die();
+			exit;
 		}
-		if ( isset($_GET['fragment'] ) ) {
-			if ( ! wp_verify_nonce($_GET['_wpnonce'], $this->referer_check_key) ) {
-				$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => sprintf(__('There appears to be an unauthorized attempt from this site to access your database located at %1s.  The attempt has been halted.','wp-db-backup'),get_option('home'))));
-			}
+		if (isset($_GET['fragment'] )) {
 			list($table, $segment, $filename) = explode(':', $_GET['fragment']);
-			if ( 0 < validate_file($filename) ) {
-				$this->log_error(array('kind' => 'fatal', 'loc' => 'frame', 'msg' => __('Invalid file request.','wp-db-backup')));
-				exit;
-			}
+			$this->validate_file($filename);
 			$this->backup_fragment($table, $segment, $filename);
 		}
 
@@ -257,11 +207,19 @@ class WP_DB_Backup {
 		load_plugin_textdomain('wp-db-backup', str_replace(ABSPATH, '', dirname(__FILE__)), dirname(plugin_basename(__FILE__)));
 	}
 
+	function set_page_url() {
+		$query_args = array( 'page' => $this->basename );
+		if ( function_exists('wp_create_nonce') )
+			$query_args = array_merge( $query_args, array('_wpnonce' => wp_create_nonce($this->referer_check_key)) );
+		$base = ( function_exists('site_url') ) ? site_url('', 'admin') : get_option('siteurl');
+		$this->page_url = add_query_arg( $query_args, $base . '/wp-admin/edit.php');
+	}
+
 	/*
 	 * Add a link to back up your database when doing a core upgrade 
 	 */
 	function update_notice_action() {
-		if ( empty( $_GET['action'] ) || 'upgrade-core' == $_GET['action'] ) :
+		if ( 'upgrade-core' == $_REQUEST['action'] ) :
 			ob_start(array(&$this, 'update_notice'));
 			add_action('admin_footer', create_function('', 'ob_end_flush();'));
 		endif;
@@ -273,28 +231,7 @@ class WP_DB_Backup {
 			return $text;
 		}
 
-	/**
-	 * Determine whether the server is using mod_evasive or the like.  Will also return true if MOD_EVASIVE_OVERRIDE is defined and true.
-	 *
-	 * @access private 
-	 *
-	 * @return bool Whether the server is using mod_evasive
-	 */
-	function _using_evasive_module() {
-		if ( true === $this->mod_evasive_override ) 
-			return true;
-
-		if ( function_exists('apache_get_modules') ) {
-			foreach( (array) apache_get_modules() as $mod ) {
-				if ( false !== strpos($mod,'mod_evasive') || false !== strpos($mod,'mod_dosevasive') ) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-
-	function print_backup_script() {
+	function build_backup_script() {
 		global $table_prefix, $wpdb;
 	
 		echo "<div class='wrap'>";
@@ -308,7 +245,7 @@ class WP_DB_Backup {
 				<li>'.__('Click the Stop or Back buttons in your browser','wp-db-backup').'</li>
 			</ol>
 			<p><strong>' . __('Progress:','wp-db-backup') . '</strong></p>
-			<div id="meterbox" style="height:11px;width:80%;padding:3px;border:1px solid #659fff;"><div id="meter" style="height:11px;line-height:11px;background-color:#659fff;width:0%;text-align:center;font-size:6pt;">&nbsp;</div></div>
+			<div id="meterbox" style="height:11px;width:80%;padding:3px;border:1px solid #659fff;"><div id="meter" style="color:#fff;height:11px;line-height:11px;background-color:#659fff;width:0%;text-align:center;font-size:6pt;">&nbsp;</div></div>
 			<div id="progress_message"></div>
 			<div id="errors"></div>
 			</fieldset>
@@ -353,21 +290,30 @@ class WP_DB_Backup {
 		switch($_POST['deliver']) {
 		case 'http':
 			echo '
-				setProgress("' . sprintf(__("Backup complete, preparing <a href=\\\"%s\\\">backup</a> for download...",'wp-db-backup'), $download_uri) . '");
+				setProgress("' . __('Preparing download.','wp-db-backup') . '");
 				window.onbeforeunload = null; 
 				fram.src = "' . $download_uri . '";
+				
+				setTimeout( function() {
+					var secondFrame = document.createElement("iframe");				
+					fram.parentNode.insertBefore(secondFrame, fram);
+					secondFrame.src = "' . $download_uri . '&download-retry=1";
+				}, 30000 );
 			';
 			break;
 		case 'smtp':
+			if ( get_option('wpdb_backup_recip') != $_POST['backup_recipient'] ) {
+				update_option('wpdb_backup_recip', $_POST['backup_recipient'] );
+			}
 			echo '
-				setProgress("' . sprintf(__("Backup complete, sending <a href=\\\"%s\\\">backup</a> via email...",'wp-db-backup'), $download_uri) . '");
+				setProgress("' . sprintf(__('Your backup has been emailed to %s','wp-db-backup'), $_POST['backup_recipient']) . '");
 				window.onbeforeunload = null; 
 				fram.src = "' . $download_uri . '&via=email&recipient=' . $_POST['backup_recipient'] . '";
 			';
 			break;
 		default:
 			echo '
-				setProgress("' . sprintf(__("Backup complete, download <a href=\\\"%s\\\">here</a>.",'wp-db-backup'), $download_uri) . '");
+				setProgress("' . __('Backup Complete!','wp-db-backup') . '");
 				window.onbeforeunload = null; 
 			';
 		}
@@ -391,9 +337,9 @@ class WP_DB_Backup {
 		$step_count = 1;
 		foreach ($tables as $table) {
 			$rec_count = $wpdb->get_var("SELECT count(*) FROM {$table}");
-			$rec_segments = ceil($rec_count / $this->_rows_per_segment);
+			$rec_segments = ceil($rec_count / ROWS_PER_SEGMENT);
 			$table_count = 0;
-			if ( $this->_using_evasive_module() ) {
+			if ( $this->module_check() ) {
 				$delay = "setTimeout('";
 				$delay_time = "', " . (int) MOD_EVASIVE_DELAY . ")";
 			}
@@ -418,7 +364,7 @@ class WP_DB_Backup {
 			</script>
 	</div>
 		';
-		$this->print_backup_menu();
+		$this->backup_menu();
 	}
 
 	function backup_fragment($table, $segment, $filename) {
@@ -439,15 +385,15 @@ class WP_DB_Backup {
 		if (is_writable($this->backup_dir)) {
 			$this->fp = $this->open($this->backup_dir . $filename, 'a');
 			if(!$this->fp) {
-				$this->log_error(__('Could not open the backup file for writing!','wp-db-backup'));
-				$this->log_error(array('loc' => 'frame', 'kind' => 'fatal', 'msg' =>  __('The backup file could not be saved.  Please check the permissions for writing to your backup directory and try again.','wp-db-backup')));
+				$this->error(__('Could not open the backup file for writing!','wp-db-backup'));
+				$this->error(array('loc' => 'frame', 'kind' => 'fatal', 'msg' =>  __('The backup file could not be saved.  Please check the permissions for writing to your backup directory and try again.','wp-db-backup')));
 			}
 			else {
 				if($table == '') {		
 					//Begin new backup of MySql
 					$this->stow("# " . __('WordPress MySQL database backup','wp-db-backup') . "\n");
 					$this->stow("#\n");
-					$this->stow("# " . sprintf(__('Generated: %s','wp-db-backup'),gmdate("l j. F Y H:i T")) . "\n");
+					$this->stow("# " . sprintf(__('Generated: %s','wp-db-backup'),date("l j. F Y H:i T")) . "\n");
 					$this->stow("# " . sprintf(__('Hostname: %s','wp-db-backup'),DB_HOST) . "\n");
 					$this->stow("# " . sprintf(__('Database: %s','wp-db-backup'),$this->backquote(DB_NAME)) . "\n");
 					$this->stow("# --------------------------------------------------------\n");
@@ -464,12 +410,12 @@ class WP_DB_Backup {
 				}
 			}
 		} else {
-			$this->log_error(array('kind' => 'fatal', 'loc' => 'frame', 'msg' => __('The backup directory is not writeable!  Please check the permissions for writing to your backup directory and try again.','wp-db-backup')));
+			$this->error(array('kind' => 'fatal', 'loc' => 'frame', 'msg' => __('The backup directory is not writeable!  Please check the permissions for writing to your backup directory and try again.','wp-db-backup')));
 		}
 
 		if($this->fp) $this->close($this->fp);
 		
-		$this->print_error_messages('frame');
+		$this->error_display('frame');
 
 		echo '<script type="text/javascript"><!--//
 		var msg = "' . $msg . '";
@@ -486,10 +432,13 @@ class WP_DB_Backup {
 		if (isset($_POST['other_tables']))
 			$also_backup = $_POST['other_tables'];
 		$core_tables = $_POST['core_tables'];
-		$this->backup_file = $this->do_db_backup($core_tables, $also_backup);
+		$this->backup_file = $this->db_backup($core_tables, $also_backup);
 		if (false !== $this->backup_file) {
 			if ('smtp' == $_POST['deliver']) {
-				$this->deliver_backup($this->backup_file, 'smtp', $_POST['backup_recipient'], 'main');
+				$this->deliver_backup($this->backup_file, $_POST['deliver'], $_POST['backup_recipient'], 'main');
+				if ( get_option('wpdb_backup_recip') != $_POST['backup_recipient'] ) {
+					update_option('wpdb_backup_recip', $_POST['backup_recipient'] );
+				}
 				wp_redirect($this->page_url);
 			} elseif ('http' == $_POST['deliver']) {
 				$download_uri = add_query_arg('backup',$this->backup_file,$this->page_url);
@@ -501,22 +450,7 @@ class WP_DB_Backup {
 		}
 	}
 
-	/**
-	 * Filter the plugin action links, which appear on the main admin plugin page.
-	 * @param array $links The links.
-	 * @param string $file The current plugin file.
-	 * @return array The array of links to show in the settings area
-	 */
-	function filter_plugin_action_links( $links = array(), $file = '')
-	{
-		if ( plugin_basename(__FILE__) == $file ) {
-			$link = '<a href="tools.php?page=' . $this->basename . '">' . __('Configure &amp; Backup', 'wp-db-backup') . '</a>';
-			array_unshift( $links, $link );
-		}
-		return $links;
-	}
-
-	function print_admin_header() {
+	function admin_header() {
 		?>
 		<script type="text/javascript">
 		//<![CDATA[
@@ -540,7 +474,7 @@ class WP_DB_Backup {
 						}
 					}
 					t[k].p = d.getElementsByTagName("input");
-					for(var i=0; i < t[k].p.length; i++)
+					for(var i=0; i < t[k].p.length; i++) {
 						if(t[k].name == t[k].p[i].getAttribute('name')) {
 							t[k].p[i].id = k + '-table-' + i;
 							t[k].p[i].onkeyup = t[k].p[i].onclick = function(e) {
@@ -561,6 +495,7 @@ class WP_DB_Backup {
 								}
 							}
 						}
+					}
 				}
 
 				<?php if ( function_exists('wp_schedule_event') ) : // needs to be at least WP 2.1 for ajax ?>
@@ -572,7 +507,9 @@ class WP_DB_Backup {
 				var initTimeChange = function() {
 					var timeWrap = document.getElementById('backup-time-wrap');
 					var backupTime = document.getElementById('next-backup-time');
-					if ( !! timeWrap && !! backupTime ) {
+					if ( !! timeWrap && !! backupTime && ( 1 == <?php
+						echo (int) ( 'en' == strtolower( substr( get_locale(), 0, 2 ) ) );	
+					?> ) ) {
 						var span = document.createElement('span');
 						span.className = 'submit';
 						span.id = 'change-wrap';
@@ -633,6 +570,13 @@ class WP_DB_Backup {
 				border: 1px solid;
 				margin-top: 1em;
 				padding: 1em;
+				-moz-border-radius: 8px;
+				-khtml-border-radius: 8px;
+				-webkit-border-top-left-radius: 8px;
+				-webkit-border-top-right-radius: 8px;
+				-webkit-border-bottom-left-radius: 8px;
+				-webkit-border-bottom-right-radius: 8px;
+				border-radius: 8px;
 			}
 				fieldset.options div.tables-list {
 					float: left;
@@ -668,42 +612,43 @@ class WP_DB_Backup {
 	}
 
 	function admin_load() {
-		add_action('admin_head', array(&$this, 'print_admin_header'));
+		add_action('admin_head', array(&$this, 'admin_header'));
 	}
 
 	function admin_menu() {
-		$_page_hook = add_management_page(__('Backup','wp-db-backup'), __('Backup','wp-db-backup'), 'import', $this->basename, array(&$this, 'print_backup_menu'));
+		$_page_hook = add_management_page(__('Backup','wp-db-backup'), __('Backup','wp-db-backup'), 'import', $this->basename, array(&$this, 'backup_menu'));
 		add_action('load-' . $_page_hook, array(&$this, 'admin_load'));
-		if ( function_exists('add_contextual_help') ) {
+		if (function_exists('get_current_screen')) {
+			$screen = convert_to_screen($_page_hook);
+			if (method_exists($screen,'add_help_tab')) {
+				$screen->add_help_tab(array(
+					'title' => __('Backup','wp-db-backup'),
+					'id' => $_page_hook,
+					'content' => $this->help_menu(),
+				));
+			}
+		} elseif ( function_exists('add_contextual_help') ) {
 			$text = $this->help_menu();
 			add_contextual_help($_page_hook, $text);
 		}
 	}
 
 	function fragment_menu() {
-		$_page_hook = add_management_page(__('Backup','wp-db-backup'), __('Backup','wp-db-backup'), 'import', $this->basename, array(&$this, 'print_backup_script'));
-		add_action('load-' . $_page_hook, array(&$this, 'admin_load'));
-		if ( function_exists('add_contextual_help') ) {
-			$text = $this->help_menu();
-			add_contextual_help($_page_hook, $text);
-		}
+		$page_hook = add_management_page(__('Backup','wp-db-backup'), __('Backup','wp-db-backup'), 'import', $this->basename, array(&$this, 'build_backup_script'));
+		add_action('load-' . $page_hook, array(&$this, 'admin_load'));
 	}
 
 	/** 
 	 * Add WP-DB-Backup-specific help options to the 2.7 =< WP contextual help menu
-	 * return string The text of the help menu.
+	 * @return string The text of the help menu.
 	 */
 	function help_menu() {
 		$text = "\n<a href=\"http://wordpress.org/extend/plugins/wp-db-backup/faq/\" target=\"_blank\">" . __('FAQ', 'wp-db-backup') . '</a>';
-		$text .= "\n<br />\n<a href=\"http://www.ilfilosofo.com/forum/forum/2\" target=\"_blank\">" . __('WP-DB-Backup Support Forum', 'wp-db-backup') . '</a>';
 		return $text;
 	}
 
 	function save_backup_time() {
-		if ( $this->current_user_can_backup() ) {
-			if ( ! wp_verify_nonce($_POST['_wpnonce'], $this->referer_check_key) ) {
-				$this->log_error(array('loc' => 'main', 'kind' => 'fatal', 'msg' => sprintf(__('There appears to be an unauthorized attempt from this site to access your database located at %1s.  The attempt has been halted.','wp-db-backup'),get_option('home'))));
-			}
+		if ( $this->can_user_backup() ) {
 			// try to get a time from the input string
 			$time = strtotime(strval($_POST['backup-time']));
 			if ( ! empty( $time ) && time() < $time ) {
@@ -726,10 +671,8 @@ class WP_DB_Backup {
 	 * Taken from phpMyAdmin.
 	 */
 	function sql_addslashes($a_string = '', $is_like = false) {
-		if ( $is_like ) 
-			$a_string = str_replace('\\', '\\\\\\\\', $a_string);
-		else 
-			$a_string = str_replace('\\', '\\\\', $a_string);
+		if ($is_like) $a_string = str_replace('\\', '\\\\\\\\', $a_string);
+		else $a_string = str_replace('\\', '\\\\', $a_string);
 		return str_replace('\'', '\\\'', $a_string);
 	} 
 
@@ -770,7 +713,7 @@ class WP_DB_Backup {
 	 */
 	function stow($query_line) {
 		if(false === @fwrite($this->fp, $query_line))
-			$this->log_error(__('There was an error writing a line to the backup script:','wp-db-backup') . '  ' . $query_line . '  ' . $php_errormsg);
+			$this->error(__('There was an error writing a line to the backup script:','wp-db-backup') . '  ' . $query_line . '  ' . $php_errormsg);
 	}
 	
 	/**
@@ -778,13 +721,13 @@ class WP_DB_Backup {
 	 * @param array $args
 	 * @return bool
 	 */
-	function log_error($args = array()) {
+	function error($args = array()) {
 		if ( is_string( $args ) ) 
 			$args = array('msg' => $args);
 		$args = array_merge( array('loc' => 'main', 'kind' => 'warn', 'msg' => ''), $args);
 		$this->errors[$args['kind']][] = $args['msg'];
 		if ( 'fatal' == $args['kind'] || 'frame' == $args['loc'])
-			$this->print_error_messages($args['loc']);
+			$this->error_display($args['loc']);
 		return true;
 	}
 
@@ -794,19 +737,14 @@ class WP_DB_Backup {
 	 * @param string $loc
 	 * @return string
 	 */
-	function print_error_messages($loc = 'main', $echo = true) {
+	function error_display($loc = 'main', $echo = true) {
 		$errs = $this->errors;
-		$err_list = array();
 		unset( $this->errors );
 		if ( ! count($errs) ) return;
 		$msg = '';
-		if ( isset($errs) && isset($errs['fatal']) ) {
-			$err_list = array_merge($err_list, (array) $errs['fatal']);
-		}
-		if ( isset($errs) && isset($errs['warn']) ) {
-			$err_list = array_merge($err_list, (array) $errs['warn']);
-		}
-		$err_list = array_slice($err_list, 0, 10);
+		$errs['fatal'] = isset( $errs['fatal'] ) ? (array) $errs['fatal'] : array();
+		$errs['warn'] = isset( $errs['warn'] ) ? (array) $errs['warn'] : array();
+		$err_list = array_slice( array_merge( $errs['fatal'], $errs['warn'] ), 0, 10);
 		if ( 10 == count( $err_list ) )
 			$err_list[9] = __('Subsequent errors have been omitted from this log.','wp-db-backup');
 		$wrap = ( 'frame' == $loc ) ? "<script type=\"text/javascript\">\n var msgList = ''; \n %1\$s \n if ( msgList ) alert(msgList); \n </script>" : '%1$s';
@@ -842,7 +780,7 @@ class WP_DB_Backup {
 
 		$table_structure = $wpdb->get_results("DESCRIBE $table");
 		if (! $table_structure) {
-			$this->log_error(__('Error getting table details','wp-db-backup') . ": $table");
+			$this->error(__('Error getting table details','wp-db-backup') . ": $table");
 			return false;
 		}
 	
@@ -866,14 +804,14 @@ class WP_DB_Backup {
 			$create_table = $wpdb->get_results("SHOW CREATE TABLE $table", ARRAY_N);
 			if (false === $create_table) {
 				$err_msg = sprintf(__('Error with SHOW CREATE TABLE for %s.','wp-db-backup'), $table);
-				$this->log_error($err_msg);
+				$this->error($err_msg);
 				$this->stow("#\n# $err_msg\n#\n");
 			}
 			$this->stow($create_table[0][1] . ' ;');
 			
 			if (false === $table_structure) {
 				$err_msg = sprintf(__('Error getting table structure of %s','wp-db-backup'), $table);
-				$this->log_error($err_msg);
+				$this->error($err_msg);
 				$this->stow("#\n# $err_msg\n#\n");
 			}
 		
@@ -903,10 +841,10 @@ class WP_DB_Backup {
 			
 			if($segment == 'none') {
 				$row_start = 0;
-				$row_inc = $this->_rows_per_segment;
+				$row_inc = ROWS_PER_SEGMENT;
 			} else {
-				$row_start = $segment * $this->_rows_per_segment;
-				$row_inc = $this->_rows_per_segment;
+				$row_start = $segment * ROWS_PER_SEGMENT;
+				$row_inc = ROWS_PER_SEGMENT;
 			}
 			
 			do {	
@@ -930,7 +868,7 @@ class WP_DB_Backup {
 					foreach ($table_data as $row) {
 						$values = array();
 						foreach ($row as $key => $value) {
-							if ( isset($ints[strtolower($key)]) && $ints[strtolower($key)]) {
+							if ($ints[strtolower($key)]) {
 								// make sure there are no blank spots in the insert syntax,
 								// yet try to avoid quotation marks around integers
 								$value = ( null === $value || '' === $value) ? $defs[strtolower($key)] : $value;
@@ -956,34 +894,32 @@ class WP_DB_Backup {
 		}
 	} // end backup_table()
 	
-	/**
-	 * Create the backup file.
-	 *
-	 * @param array $tables The database tables to backup.
-	 * @return mixed. String of database file path or false if failure.
-	 */
-	function do_db_backup($tables = array())
-	{
+	function db_backup($core_tables, $other_tables) {
 		global $table_prefix, $wpdb;
 		
 		if (is_writable($this->backup_dir)) {
 			$this->fp = $this->open($this->backup_dir . $this->backup_filename);
 			if(!$this->fp) {
-				$this->log_error(__('Could not open the backup file for writing!','wp-db-backup'));
+				$this->error(__('Could not open the backup file for writing!','wp-db-backup'));
 				return false;
 			}
 		} else {
-			$this->log_error(__('The backup directory is not writeable!','wp-db-backup'));
+			$this->error(__('The backup directory is not writeable!','wp-db-backup'));
 			return false;
 		}
 		
 		//Begin new backup of MySql
 		$this->stow("# " . __('WordPress MySQL database backup','wp-db-backup') . "\n");
 		$this->stow("#\n");
-		$this->stow("# " . sprintf(__('Generated: %s','wp-db-backup'),gmdate("l j. F Y H:i T")) . "\n");
+		$this->stow("# " . sprintf(__('Generated: %s','wp-db-backup'),date("l j. F Y H:i T")) . "\n");
 		$this->stow("# " . sprintf(__('Hostname: %s','wp-db-backup'),DB_HOST) . "\n");
 		$this->stow("# " . sprintf(__('Database: %s','wp-db-backup'),$this->backquote(DB_NAME)) . "\n");
 		$this->stow("# --------------------------------------------------------\n");
+		
+			if ( (is_array($other_tables)) && (count($other_tables) > 0) )
+			$tables = array_merge($core_tables, $other_tables);
+		else
+			$tables = $core_tables;
 		
 		foreach ($tables as $table) {
 			// Increase script execution time-limit to 15 min for every table.
@@ -1003,68 +939,33 @@ class WP_DB_Backup {
 			return $this->backup_filename;
 		}
 		
-	} // do_db_backup
+	} //wp_db_backup
 
 	/**
-	 * Prepares and sends the backed-up file via email
-	 *
-	 * @param string $to The recipient of the email.
-	 * @param string $subject The subject of the email.
-	 * @param string $message The text message for the backup email.
-	 * @param string $diskfile The path to the backup file.
+	 * Sends the backed-up file via email
+	 * @param string $to
+	 * @param string $subject
+	 * @param string $message
 	 * @return bool
 	 */
-	function prepare_mail( $to, $subject, $message, $diskfile)
-	{
+	function send_mail( $to, $subject, $message, $diskfile) {
 		global $phpmailer;
+
+		$filename = basename($diskfile);
 
 		extract( apply_filters( 'wp_mail', compact( 'to', 'subject', 'message' ) ) );
 
-		// try to use phpmailer directly (WP 2.2+)
-		if ( 
-			! class_exists('PHPMailer') ||
-			! is_object( $phpmailer ) || 
-			! is_a( $phpmailer, 'PHPMailer' ) 
-		) {
+		if ( !is_object( $phpmailer ) || ( strtolower(get_class( $phpmailer )) != 'phpmailer' ) ) {
 			if ( file_exists( ABSPATH . WPINC . '/class-phpmailer.php' ) )
 				require_once ABSPATH . WPINC . '/class-phpmailer.php';
 			if ( file_exists( ABSPATH . WPINC . '/class-smtp.php' ) )
 				require_once ABSPATH . WPINC . '/class-smtp.php';
-			if ( class_exists( 'PHPMailer') ) {
-				$phpmailer = new PHPMailer;
-
-			}
+			if ( class_exists( 'PHPMailer') )
+				$phpmailer = new PHPMailer();
 		}
 
-		if ( is_a($phpmailer, 'PHPMailer') ) {
-			return $this->send_mail($phpmailer, $to, $subject, $message, $diskfile);
-		}
-
-		return false;
-	}
-
-	/**
-	 * Sends the backed-up file via email
-	 *
-	 * @param object $phpmailer The PHPMailer object.
-	 * @param string $to The recipient of the email.
-	 * @param string $subject The subject of the email.
-	 * @param string $message The text message for the backup email.
-	 * @param string $diskfile The path to the backup file.
-	 * @return bool
-	 */
-	function send_mail($phpmailer = null, $to = '', $subject = '', $message = '', $diskfile)
-	{
-		$result = false;
-
-		if ( 
-			empty( $diskfile ) ||
-			empty( $to )
-		) {
-			return false;
-		}
-	
-		if ( is_a($phpmailer, 'PHPMailer') ) {
+		// try to use phpmailer directly (WP 2.2+)
+		if ( is_object( $phpmailer ) && ( strtolower(get_class( $phpmailer )) == 'phpmailer' ) ) {
 			
 			// Get the site domain and get rid of www.
 			$sitename = strtolower( $_SERVER['SERVER_NAME'] );
@@ -1084,7 +985,7 @@ class WP_DB_Backup {
 			$phpmailer->ClearReplyTos();
 
 			$phpmailer->AddAddress( $to );
-			$phpmailer->AddAttachment($diskfile, basename($diskfile));
+			$phpmailer->AddAttachment($diskfile, $filename);
 			$phpmailer->Body = $message;
 			$phpmailer->CharSet = apply_filters( 'wp_mail_charset', get_bloginfo('charset') );
 			$phpmailer->From = apply_filters( 'wp_mail_from', $from_email );
@@ -1092,71 +993,131 @@ class WP_DB_Backup {
 			$phpmailer->IsMail();
 			$phpmailer->Subject = $subject;
 
+			do_action_ref_array( 'phpmailer_init', array( &$phpmailer ) );
+			
 			$result = @$phpmailer->Send();
 
+		// old-style: build the headers directly
+		} else {
+			$randomish = md5(time());
+			$boundary = "==WPBACKUP-$randomish";
+			$fp = fopen($diskfile,"rb");
+			$file = fread($fp,filesize($diskfile)); 
+			$this->close($fp);
+			
+			$data = chunk_split(base64_encode($file));
+			
+			$headers .= "MIME-Version: 1.0\n";
+			$headers = 'From: wordpress@' . preg_replace('#^www\.#', '', strtolower($_SERVER['SERVER_NAME'])) . "\n";
+			$headers .= "Content-Type: multipart/mixed; boundary=\"$boundary\"\n";
+		
+			// Add a multipart boundary above the plain message
+			$message = "This is a multi-part message in MIME format.\n\n" .
+		        	"--{$boundary}\n" .
+				"Content-Type: text/plain; charset=\"" . get_bloginfo('charset') . "\"\n" .
+				"Content-Transfer-Encoding: 7bit\n\n" .
+				$message . "\n\n";
+
+			// Add file attachment to the message
+			$message .= "--{$boundary}\n" .
+				"Content-Type: application/octet-stream;\n" .
+				" name=\"{$filename}\"\n" .
+				"Content-Disposition: attachment;\n" .
+				" filename=\"{$filename}\"\n" .
+				"Content-Transfer-Encoding: base64\n\n" .
+				$data . "\n\n" .
+				"--{$boundary}--\n";
+			
+			$result = @wp_mail($to, $subject, $message, $headers);
 		}
 		return $result;
 
 	}
 
-	/**
-	 * Try to gzip the file
-	 *
-	 * @param string $filepath The path to the file which we're trying to compress
-	 * @return string The new filepath.
-	 */
-	function perhaps_compress_file( $filename = '' )
-	{
-		if ( ! empty($filename) && function_exists('gzencode') ) {
-			$gz_filename = "{$filename}.gz";
-			if ( function_exists('file_get_contents') ) {
-				$text = file_get_contents($filename);
-			} else {
-				$text = implode("", file($filename));
+	function deliver_backup($filename = '', $delivery = 'http', $recipient = '', $location = 'main') {
+		if ('' == $filename) { return false; }
+		
+		$diskfile = $this->backup_dir . $filename;
+		$gz_diskfile = "{$diskfile}.gz";
+
+		/**
+		 * Try upping the memory limit before gzipping
+		 */
+		if ( function_exists('memory_get_usage') && ( (int) @ini_get('memory_limit') < 64 ) ) {
+			@ini_set('memory_limit', '64M' );
+		}
+
+		if ( file_exists( $diskfile ) && empty( $_GET['download-retry'] ) ) {
+			/**
+			 * Try gzipping with an external application
+			 */
+			if ( file_exists( $diskfile ) && ! file_exists( $gz_diskfile ) ) {
+				@exec( "gzip $diskfile" );
 			}
-			$gz_text = gzencode($text, 9);
-			$fp = fopen($gz_filename, "w");
-			if ( $fp ) {
-				fwrite($fp, $gz_text);
-				if ( fclose($fp) ) {
-					unlink($filename);
-					$filename = $gz_filename;
+
+			if ( file_exists( $gz_diskfile ) ) {
+				if ( file_exists( $diskfile ) ) {
+					unlink($diskfile);
+				}
+				$diskfile = $gz_diskfile;
+				$filename = "{$filename}.gz";
+			
+			/**
+			 * Try to compress to gzip, if available 
+			 */
+			} else {
+				if ( function_exists('gzencode') ) {
+					if ( function_exists('file_get_contents') ) {
+						$text = file_get_contents($diskfile);
+					} else {
+						$text = implode("", file($diskfile));
+					}
+					$gz_text = gzencode($text, 9);
+					$fp = fopen($gz_diskfile, "w");
+					fwrite($fp, $gz_text);
+					if ( fclose($fp) ) {
+						unlink($diskfile);
+						$diskfile = $gz_diskfile;
+						$filename = "{$filename}.gz";
+					}
 				}
 			}
+			/*
+			 * 
+			 */
+		} elseif ( file_exists( $gz_diskfile ) && empty( $_GET['download-retry'] ) ) {
+			$diskfile = $gz_diskfile;
+			$filename = "{$filename}.gz";
 		}
-
-		return $filename;
-	}
-
-	function deliver_backup($filename = '', $delivery = 'http', $recipient = '', $location = 'main') {
-		if ( empty( $filename ) ) { 
-			return false; 
-		}
-		
-		$diskfile = $this->perhaps_compress_file($this->backup_dir . $filename);
-
-		$filename = basename($diskfile);
 
 		if ('http' == $delivery) {
-			if (! file_exists($diskfile)) 
-				$this->log_error(array('kind' => 'fatal', 'msg' => sprintf(__('File not found:%s','wp-db-backup'), "&nbsp;<strong>$filename</strong><br />") . '<br /><a href="' . $this->page_url . '">' . __('Return to Backup','wp-db-backup') . '</a>'));
-			header('Content-Description: File Transfer');
-			header('Content-Type: application/octet-stream');
-			header('Content-Length: ' . filesize($diskfile));
-			header("Content-Disposition: attachment; filename=$filename");
-			$success = readfile($diskfile);
-			unlink($diskfile);
+			if ( ! file_exists( $diskfile ) ) {
+				if ( empty( $_GET['download-retry'] ) ) { 
+					$this->error(array('kind' => 'fatal', 'msg' => sprintf(__('File not found:%s','wp-db-backup'), "&nbsp;<strong>$filename</strong><br />") . '<br /><a href="' . $this->page_url . '">' . __('Return to Backup','wp-db-backup') . '</a>'));
+				} else {
+					return true;
+				}
+			} elseif ( file_exists( $diskfile ) ) {
+				header('Content-Description: File Transfer');
+				header('Content-Type: application/octet-stream');
+				header('Content-Length: ' . filesize($diskfile));
+				header("Content-Disposition: attachment; filename=$filename");
+				$success = readfile($diskfile);
+				if ( $success ) {
+					unlink($diskfile);
+				}
+			}
 		} elseif ('smtp' == $delivery) {
 			if (! file_exists($diskfile)) {
 				$msg = sprintf(__('File %s does not exist!','wp-db-backup'), $diskfile);
-				$this->log_error($msg);
+				$this->error($msg);
 				return false;
 			}
 			if (! is_email($recipient)) {
 				$recipient = get_option('admin_email');
 			}
 			$message = sprintf(__("Attached to this email is\n   %1s\n   Size:%2s kilobytes\n",'wp-db-backup'), $filename, round(filesize($diskfile)/1024));
-			$success = $this->prepare_mail($recipient, get_bloginfo('name') . ' ' . __('Database Backup','wp-db-backup'), $message, $diskfile);
+			$success = $this->send_mail($recipient, get_bloginfo('name') . ' ' . __('Database Backup','wp-db-backup'), $message, $diskfile);
 
 			if ( false === $success ) {
 				$msg = __('The following errors were reported:','wp-db-backup') . "\n ";
@@ -1166,16 +1127,18 @@ class WP_DB_Backup {
 				} else {
 					$msg .= __('ERROR: The mail application has failed to deliver the backup.','wp-db-backup'); 
 				}
-				$this->log_error(array('kind' => 'fatal', 'loc' => $location, 'msg' => $msg));
+				$this->error(array('kind' => 'fatal', 'loc' => $location, 'msg' => $msg));
 			} else {
-				unlink($diskfile);
+				if ( file_exists( $diskfile ) ) {
+					unlink($diskfile);
+				}
 			}
 		}
 		return $success;
 	}
 	
-	function print_backup_menu() {
-		global $table_prefix, $wpdb, $wp_filesystem;
+	function backup_menu() {
+		global $table_prefix, $wpdb;
 		$feedback = '';
 		$whoops = false;
 		
@@ -1203,13 +1166,11 @@ class WP_DB_Backup {
 		}
 	
 		// security check
-		if ( ! $this->is_wp_secure_enough() ) {
-			$this->log_error(array('kind' => $kind, 'loc' => $loc, 'msg' => sprintf(__('Your WordPress version, %1s, lacks important security features without which it is unsafe to use the WP-DB-Backup plugin.  Hence, this plugin is automatically disabled.  Please consider <a href="%2s">upgrading WordPress</a> to a more recent version.','wp-db-backup'),$GLOBALS['wp_version'],'http://wordpress.org/download/')));
-		}
+		$this->wp_secure();  
 
 		if (count($this->errors)) {
 			$feedback .= '<div class="updated wp-db-backup-updated error"><p><strong>' . __('The following errors were reported:','wp-db-backup') . '</strong></p>';
-			$feedback .= '<p>' . $this->print_error_messages( 'main', false ) . '</p>';
+			$feedback .= '<p>' . $this->error_display( 'main', false ) . '</p>';
 			$feedback .= "</p></div>";
 		}
 
@@ -1231,7 +1192,7 @@ class WP_DB_Backup {
 			else {
 				update_option('wp_cron_backup_schedule', intval($_POST['cron_schedule']), false);
 			}
-			update_option('wp_cron_backup_tables', $_POST['wp_cron_backup_tables']);
+			update_option('wp_cron_backup_tables', isset( $_POST['wp_cron_backup_tables'] ) ? $_POST['wp_cron_backup_tables'] : array() );
 			if (is_email($_POST['cron_backup_recipient'])) {
 				update_option('wp_cron_backup_recipient', $_POST['cron_backup_recipient'], false);
 			}
@@ -1245,73 +1206,25 @@ class WP_DB_Backup {
 		$all_tables = $wpdb->get_results("SHOW TABLES", ARRAY_N);
 		$all_tables = array_map(create_function('$a', 'return $a[0];'), $all_tables);
 		// Get list of WP tables that actually exist in this DB (for 1.6 compat!)
-		$wp_backup_default_tables = array_intersect($all_tables, $this->_get_core_table_names());
+		$wp_backup_default_tables = array_intersect($all_tables, $this->core_table_names);
 		// Get list of non-WP tables
 		$other_tables = array_diff($all_tables, $wp_backup_default_tables);
 		
 		if ('' != $feedback)
 			echo $feedback;
 
-		if ( ! $this->is_wp_secure_enough() ) 	
-			return false;
+		if ( ! $this->wp_secure() ) 	
+			return;
 
 		// Give the new dirs the same perms as wp-content.
 //		$stat = stat( ABSPATH . 'wp-content' );
 //		$dir_perms = $stat['mode'] & 0000777; // Get the permission bits.
 		$dir_perms = '0777';
 
-		// if filesystem ftp available and trying to do that
-		if ( function_exists( 'request_filesystem_credentials' ) && ! empty( $_POST['ftp-nonce'] ) ) :
-			if ( $this->current_user_can_backup() && wp_verify_nonce( $_POST['ftp-nonce'], 'ftp-change' ) ) :
-				ob_start();
-				WP_Filesystem(@request_filesystem_credentials(), false);
-				$ftp_backup_dir = trailingslashit($wp_filesystem->wp_content_dir()) . basename($this->backup_dir);
-				ob_end_clean();
-				if ( isset($wp_filesystem) ) :
-					if ( is_callable(array($wp_filesystem, 'mkdir')) ) :
-						if ( @$wp_filesystem->mkdir($ftp_backup_dir, 0777) && file_exists($this->backup_dir) ) :
-							?><div class="updated wp-db-backup-updated"><p><?php _e('WordPress has successfully created the backup directory.', 'wp-db-backup'); ?></p></div><?php 
-						else :
-							?><div class="updated wp-db-backup-updated error"><p><?php _e('WordPress has failed to create the backup directory.', 'wp-db-backup'); ?></p></div><?php 
-						endif; // mkdir returns true
-					endif; // wp_filesystem->mkdir is callable
-					
-					if ( is_callable(array($wp_filesystem, 'chmod')) && ! is_writable($this->backup_dir) && file_exists($this->backup_dir) && @$wp_filesystem->chmod($ftp_backup_dir, 0777) ) :
-						if ( is_writable($this->backup_dir) ) :
-							?><div class="updated wp-db-backup-updated"><p><?php _e('WordPress has successfully made the backup directory writable.', 'wp-db-backup'); ?></p></div><?php 
-						else :
-							?><div class="updated wp-db-backup-updated error"><p><?php _e('WordPress has failed to make the backup directory writable.', 'wp-db-backup'); ?></p></div><?php 
-						endif; // the backup directory now is writable
-					endif; // wp_filesystem->chmod is callable and the directory is not writable
-				endif;
-			else :	
-				?><div class="updated wp-db-backup-updated error"><p><?php _e('ERROR: Your attempt to create the backup directory has failed a permission check.', 'wp-db-backup'); ?></p></div><?php 
-			endif;
-		endif;
-
 		// the file doesn't exist and can't create it
 		if ( ! file_exists($this->backup_dir) && ! @mkdir($this->backup_dir) ) {
-			?><div class="updated wp-db-backup-updated error"><p><?php _e('WARNING: Your backup directory does <strong>NOT</strong> exist, and we cannot create it automatically.','wp-db-backup'); ?></p>
-			<p><?php printf(__('Using your FTP client, try to create the backup directory yourself: %s', 'wp-db-backup'), '<code>' . $this->backup_dir . '</code>'); ?></p>
-			
-			<?php 
-
-			// if filesystem ftp available, let's suggest that:
-			if ( function_exists( 'request_filesystem_credentials' ) ) :
-				?><p><?php _e('Or you can put your FTP information for this site in the form below and let WordPress attempt to create the backup directory for you.', 'wp-db-backup'); ?></p>
-				<?php 
-				$nonce = function_exists('wp_nonce_field') ? 
-					wp_nonce_field($this->referer_check_key, '_wpnonce', true, false) . wp_nonce_field('ftp-change', 'ftp-nonce') :
-					'';
-				@ob_start();
-				request_filesystem_credentials('');
-				$ftp_form = ob_get_clean();
-				$ftp_form = str_replace('h2', 'h3', $ftp_form);
-				$ftp_form = str_replace('class="wrap"', '', $ftp_form);
-				$ftp_form = str_replace('</form>', "\n$nonce\n</form>", $ftp_form);
-			endif;
-			?></div><?php
-
+			?><div class="updated wp-db-backup-updated error"><p><?php _e('WARNING: Your backup directory does <strong>NOT</strong> exist, and we cannot create it.','wp-db-backup'); ?></p>
+			<p><?php printf(__('Using your FTP client, try to create the backup directory yourself: %s', 'wp-db-backup'), '<code>' . $this->backup_dir . '</code>'); ?></p></div><?php
 			$whoops = true;
 		// not writable due to write permissions
 		} elseif ( !is_writable($this->backup_dir) && ! @chmod($this->backup_dir, $dir_perms) ) {
@@ -1342,9 +1255,6 @@ class WP_DB_Backup {
 			@ touch($this->backup_dir . 'index.php');
 		?><div class='wrap'>
 		<h2><?php _e('Backup','wp-db-backup') ?></h2>
-		<?php if ( ! empty( $ftp_form ) ) :
-			echo $ftp_form;
-		endif; ?>
 		<form method="post" action="">
 		<?php if ( function_exists('wp_nonce_field') ) wp_nonce_field($this->referer_check_key); ?>
 		<fieldset class="options"><legend><?php _e('Tables','wp-db-backup') ?></legend>
@@ -1397,7 +1307,13 @@ class WP_DB_Backup {
 			<li><label for="do_email">
 				<input type="radio" name="deliver" id="do_email" value="smtp" style="border:none;" />
 				<?php _e('Email backup to:','wp-db-backup'); ?>
-				<input type="text" name="backup_recipient" size="20" value="<?php echo get_option('admin_email'); ?>" />
+				<input type="text" name="backup_recipient" size="20" value="<?php 
+					$backup_recip = get_option('wpdb_backup_recip');
+					if ( empty( $backup_recip ) ) {
+						$backup_recip = get_option('admin_email');
+					}
+
+					echo $backup_recip; ?>" />
 			</label></li>
 			</ul>
 			<?php if ( ! $whoops ) : ?>
@@ -1406,7 +1322,7 @@ class WP_DB_Backup {
 				<input type="submit" name="submit" onclick="document.getElementById('do_backup').value='fragments';" value="<?php _e('Backup now!','wp-db-backup'); ?>" />
 			</p>
 			<?php else : ?>
-				<p class="error"><?php _e('WARNING: Your backup directory is <strong>NOT</strong> writable!','wp-db-backup'); ?></p>
+				<div class="updated wp-db-backup-updated error"><p><?php _e('WARNING: Your backup directory is <strong>NOT</strong> writable!','wp-db-backup'); ?></p></div>
 			<?php endif; // ! whoops ?>
 		</fieldset>
 		<?php do_action('wp_db_b_backup_opts'); ?>
@@ -1456,11 +1372,7 @@ class WP_DB_Backup {
 			}
 			$cron_recipient_input = '<p><label for="cron_backup_recipient">' . __('Email backup to:','wp-db-backup') . ' <input type="text" name="cron_backup_recipient" id="cron_backup_recipient" size="20" value="' . $cron_recipient . '" /></label></p>';
 			echo apply_filters('wp_db_b_cron_recipient_input', $cron_recipient_input);
-			if ( ! $whoops ) {
-				echo '<p class="submit"><input type="submit" name="submit" value="' . __('Schedule backup','wp-db-backup') . '" /></p>';
-			} else {
-				echo '<p class="error">' . __('WARNING: Your backup directory is <strong>NOT</strong> writable!','wp-db-backup') . '</p>';
-			}
+			echo '<p class="submit"><input type="submit" name="submit" value="' . __('Schedule backup','wp-db-backup') . '" /></p>';
 			echo '</div>';
 			$cron_tables = get_option('wp_cron_backup_tables');
 			if (! is_array($cron_tables)) {
@@ -1484,7 +1396,7 @@ class WP_DB_Backup {
 		
 		echo '</div><!-- .wrap -->';
 		
-	} // end print_backup_menu()
+	} // end wp_backup_menu()
 
 	function get_sched() {
 		$options = array_keys( (array) wp_get_schedules() );
@@ -1519,65 +1431,94 @@ class WP_DB_Backup {
 		return $menu;
 	} // end schedule_choices()
 	
-	/**
-	 * Do a cron-spawned backup
-	 */
-	function do_cron_backup() {
-		global $wpdb;
+	function wp_cron_daily() { // for legacy cron plugin
+		$schedule = intval(get_option('wp_cron_backup_schedule'));
+		// If scheduled backup is disabled
+		if (0 == $schedule)
+		        return;
+		else return $this->cron_backup();
+	} 
 
-		$all_tables = (array) $wpdb->get_col('SHOW TABLES');
-		$core_tables = array_intersect($all_tables, $this->_get_core_table_names());
-		$other_tables = (array) get_option('wp_cron_backup_tables');
+	function cron_backup() {
+		global $table_prefix, $wpdb;
+		$all_tables = $wpdb->get_results("SHOW TABLES", ARRAY_N);
+		$all_tables = array_map(create_function('$a', 'return $a[0];'), $all_tables);
+		$core_tables = array_intersect($all_tables, $this->core_table_names);
+		$other_tables = get_option('wp_cron_backup_tables');
 		$recipient = get_option('wp_cron_backup_recipient');
-		$tables = array_filter(array_intersect($all_tables, array_merge($core_tables, $other_tables)));
-
-		$backup_file = $this->do_db_backup($tables);
-
+		$backup_file = $this->db_backup($core_tables, $other_tables);
 		if (false !== $backup_file) 
 			return $this->deliver_backup($backup_file, 'smtp', $recipient, 'main');
-		else 
-			return false;
+		else return false;
 	}
 
-	function add_cron_sched_options($sched = array()) {
+	function add_sched_options($sched) {
 		$sched['weekly'] = array('interval' => 604800, 'display' => __('Once Weekly','wp-db-backup'));
 		return $sched;
 	}
 
 	/**
-	 * Check whether WordPress has sufficient security measures to use the plugin.
-	 * Generally, the problem is that without the nonce system introduced in 2.0.3, 
-	 * this plugin is more likely to be vulnerable to surreptitious attacks (XSS and the like).
-	 *
-	 * @return bool Whether WP has sufficient features to use this plugin securely.
+	 * Checks that WordPress has sufficient security measures 
+	 * @param string $kind
+	 * @return bool
 	 */
-	function is_wp_secure_enough($kind = 'warn', $loc = 'main') 
-	{
-		if ( function_exists('wp_verify_nonce') )
-			return true;
-		else
+	function wp_secure($kind = 'warn', $loc = 'main') {
+		global $wp_version;
+		if ( function_exists('wp_verify_nonce') ) return true;
+		else {
+			$this->error(array('kind' => $kind, 'loc' => $loc, 'msg' => sprintf(__('Your WordPress version, %1s, lacks important security features without which it is unsafe to use the WP-DB-Backup plugin.  Hence, this plugin is automatically disabled.  Please consider <a href="%2s">upgrading WordPress</a> to a more recent version.','wp-db-backup'),$wp_version,'http://wordpress.org/download/')));
 			return false;
+		}
 	}
 
 	/**
 	 * Checks that the user has sufficient permission to backup
-	 *
-	 * @return bool Whether the current user has sufficient permission to backup.
+	 * @param string $loc
+	 * @return bool
 	 */
-	function current_user_can_backup()
-	{
+	function can_user_backup($loc = 'main') {
 		$can = false;
 		// make sure WPMU users are site admins, not ordinary admins
 		if ( function_exists('is_site_admin') && ! is_site_admin() )
 			return false;
-		if ( $this->is_wp_secure_enough() && current_user_can('import') )
-			$can = true;
+		if ( ( $this->wp_secure('fatal', $loc) ) && current_user_can('import') )
+			$can = $this->verify_nonce($_REQUEST['_wpnonce'], $this->referer_check_key, $loc);
+		if ( false == $can ) 
+			$this->error(array('loc' => $loc, 'kind' => 'fatal', 'msg' => __('You are not allowed to perform backups.','wp-db-backup')));
 		return $can;
 	}
+
+	/**
+	 * Verify that the nonce is legitimate
+	 * @param string $rec 	the nonce received
+	 * @param string $nonce	what the nonce should be
+	 * @param string $loc 	the location of the check
+	 * @return bool
+	 */
+	function verify_nonce($rec = '', $nonce = 'X', $loc = 'main') {
+		if ( wp_verify_nonce($rec, $nonce) )
+			return true;
+		else 
+			$this->error(array('loc' => $loc, 'kind' => 'fatal', 'msg' => sprintf(__('There appears to be an unauthorized attempt from this site to access your database located at %1s.  The attempt has been halted.','wp-db-backup'),get_option('home'))));
+	}
+
+	/**
+	 * Check whether a file to be downloaded is  
+	 * surreptitiously trying to download a non-backup file
+	 * @param string $file
+	 * @return null
+	 */ 
+	function validate_file($file) {
+		if ( (false !== strpos($file, '..')) || (false !== strpos($file, './')) || (':' == substr($file, 1, 1)) )
+			$this->error(array('kind' => 'fatal', 'loc' => 'frame', 'msg' => __("Cheatin' uh ?",'wp-db-backup')));
+	}
+
 }
 
-function wp_db_backup_init() {
-	new WP_DB_Backup; 	
+function wpdbBackup_init() {
+	global $mywpdbbackup;
+	$mywpdbbackup = new wpdbBackup(); 	
 }
 
-add_action('plugins_loaded', 'wp_db_backup_init');
+add_action('plugins_loaded', 'wpdbBackup_init');
+?>
